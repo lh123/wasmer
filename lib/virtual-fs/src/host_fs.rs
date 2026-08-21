@@ -169,6 +169,17 @@ impl crate::FileSystem for FileSystem {
         fs::create_dir(path).map_err(Into::into)
     }
 
+    fn hard_link(&self, source: &Path, target: &Path) -> Result<()> {
+        let source = self.prepare_path(source)?;
+        let target = self.prepare_path(target)?;
+
+        if target.parent().is_none() {
+            return Err(FsError::BaseNotDirectory);
+        }
+
+        fs::hard_link(source, target).map_err(Into::into)
+    }
+
     fn remove_dir(&self, path: &Path) -> Result<()> {
         let path = self.prepare_path(path)?;
 
@@ -215,28 +226,7 @@ impl crate::FileSystem for FileSystem {
             if !to_parent.exists() {
                 return Err(FsError::EntryNotFound);
             }
-            let result = if from_parent != to_parent {
-                let _ = std::fs::create_dir_all(to_parent);
-                if from.is_dir() {
-                    fs_extra::move_items(
-                        &[&from],
-                        &to,
-                        &fs_extra::dir::CopyOptions {
-                            copy_inside: true,
-                            ..Default::default()
-                        },
-                    )
-                    .map(|_| ())
-                    .map_err(|_| FsError::UnknownError)?;
-                    let _ = fs_extra::remove_items(&[&from]);
-                    Ok(())
-                } else {
-                    fs::copy(&from, &to).map(|_| ()).map_err(FsError::from)?;
-                    fs::remove_file(&from).map(|_| ()).map_err(Into::into)
-                }
-            } else {
-                fs::rename(&from, &to).map_err(Into::into)
-            };
+            let result = fs::rename(&from, &to).map_err(Into::into);
             let _ = set_file_mtime(&to, FileTime::now()).map(|_| ());
             result
         })
