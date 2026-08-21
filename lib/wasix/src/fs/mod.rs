@@ -1834,9 +1834,14 @@ impl WasiFs {
         if file.is_terminal() {
             Filetype::CharacterDevice
         } else {
-            file.file_type()
+            match file
+                .file_type()
                 .map(virtual_file_type_to_wasi_file_type)
                 .unwrap_or(Filetype::Unknown)
+            {
+                Filetype::CharacterDevice => Filetype::Unknown,
+                file_type => file_type,
+            }
         }
     }
 
@@ -3051,6 +3056,40 @@ mod tests {
                 .unwrap()
                 .st_filetype,
             Filetype::SocketStream
+        );
+    }
+
+    #[cfg(all(unix, feature = "host-fs"))]
+    #[tokio::test]
+    async fn stdio_stats_do_not_report_a_nonterminal_character_device_as_a_terminal() {
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let inodes = WasiInodes::new();
+        let fs_backing =
+            WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
+        let wasi_fs = WasiFs::new_init(fs_backing, &inodes, FS_ROOT_INO).unwrap();
+        let null = virtual_fs::host_fs::File::new(
+            tokio::runtime::Handle::current(),
+            null,
+            PathBuf::from("/dev/null"),
+            true,
+            false,
+            false,
+        );
+
+        assert!(!null.is_terminal());
+        wasi_fs
+            .swap_file(__WASI_STDIN_FILENO, Box::new(null))
+            .unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
+            Filetype::Unknown
+        );
+        assert_eq!(
+            wasi_fs
+                .filestat_fd(__WASI_STDIN_FILENO)
+                .unwrap()
+                .st_filetype,
+            Filetype::Unknown
         );
     }
 
