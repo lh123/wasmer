@@ -1830,8 +1830,13 @@ impl WasiFs {
     }
 
     pub fn fdstat(&self, fd: WasiFd) -> Result<Fdstat, Errno> {
+        let is_original_stdio = matches!(
+            fd,
+            __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO
+        ) && self.get_fd(fd)?.is_stdio;
+
         match fd {
-            __WASI_STDIN_FILENO => {
+            __WASI_STDIN_FILENO if is_original_stdio => {
                 return Ok(Fdstat {
                     fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
                     fs_flags: Fdflags::empty(),
@@ -1839,7 +1844,7 @@ impl WasiFs {
                     fs_rights_inheriting: Rights::empty(),
                 });
             }
-            __WASI_STDOUT_FILENO => {
+            __WASI_STDOUT_FILENO if is_original_stdio => {
                 return Ok(Fdstat {
                     fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
                     fs_flags: Fdflags::APPEND,
@@ -1847,7 +1852,7 @@ impl WasiFs {
                     fs_rights_inheriting: Rights::empty(),
                 });
             }
-            __WASI_STDERR_FILENO => {
+            __WASI_STDERR_FILENO if is_original_stdio => {
                 return Ok(Fdstat {
                     fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
                     fs_flags: Fdflags::APPEND,
@@ -1875,6 +1880,7 @@ impl WasiFs {
                 Kind::File { .. } => Filetype::RegularFile,
                 Kind::Dir { .. } => Filetype::Directory,
                 Kind::Symlink { .. } => Filetype::SymbolicLink,
+                Kind::PipeRx { .. } | Kind::PipeTx { .. } => Filetype::SocketStream,
                 Kind::Socket { socket } => match &socket.inner.protected.read().unwrap().kind {
                     InodeSocketKind::TcpStream { .. } => Filetype::SocketStream,
                     InodeSocketKind::Raw { .. } => Filetype::SocketRaw,
@@ -1937,7 +1943,13 @@ impl WasiFs {
         is_preopened: bool,
         name: Cow<'static, str>,
     ) -> InodeGuard {
-        let stat = Filestat::default();
+        let stat = Filestat {
+            st_filetype: match &kind {
+                Kind::PipeRx { .. } | Kind::PipeTx { .. } => Filetype::SocketStream,
+                _ => Filetype::Unknown,
+            },
+            ..Filestat::default()
+        };
         self.create_inode_with_stat(inodes, kind, is_preopened, name, stat)
     }
 
@@ -2919,6 +2931,48 @@ mod tests {
         assert_eq!(
             restored_stdout.inner.rights_inheriting,
             original_stdout.inner.rights_inheriting
+        );
+    }
+
+    #[test]
+    fn pipe_fds_report_stream_filetype_after_stdio_redirection() {
+        let inodes = WasiInodes::new();
+        let fs_backing =
+            WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
+        let wasi_fs = WasiFs::new_init(fs_backing, &inodes, FS_ROOT_INO).unwrap();
+        let (_, rx) = Pipe::new().split();
+        let pipe_inode = wasi_fs.create_inode_with_default_stat(
+            &inodes,
+            Kind::PipeRx { rx },
+            false,
+            "test-pipe".into(),
+        );
+
+        assert_eq!(
+            pipe_inode.stat.read().unwrap().st_filetype,
+            Filetype::SocketStream
+        );
+
+        let rights = Rights::FD_READ | Rights::FD_FILESTAT_GET;
+        let pipe_fd = wasi_fs
+            .create_fd(
+                rights,
+                rights,
+                Fdflags::empty(),
+                Fdflagsext::empty(),
+                0,
+                pipe_inode,
+            )
+            .unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(pipe_fd).unwrap().fs_filetype,
+            Filetype::SocketStream
+        );
+
+        wasi_fs.dup2_at(pipe_fd, __WASI_STDIN_FILENO).unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
+            Filetype::SocketStream
         );
     }
 
