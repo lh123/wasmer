@@ -143,6 +143,10 @@ where
         let inner = self.inner.lock().unwrap();
         inner.is_terminal()
     }
+    fn file_type(&self) -> Option<crate::FileType> {
+        let inner = self.inner.lock().unwrap();
+        inner.file_type()
+    }
     fn poll_read_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         let mut inner = self.inner.lock().unwrap();
         let inner = Pin::new(inner.as_mut());

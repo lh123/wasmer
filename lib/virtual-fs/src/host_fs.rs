@@ -267,34 +267,8 @@ impl TryInto<Metadata> for std::fs::Metadata {
     type Error = io::Error;
 
     fn try_into(self) -> std::result::Result<Metadata, Self::Error> {
-        let filetype = self.file_type();
-        let (char_device, block_device, socket, fifo) = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileTypeExt;
-                (
-                    filetype.is_char_device(),
-                    filetype.is_block_device(),
-                    filetype.is_socket(),
-                    filetype.is_fifo(),
-                )
-            }
-            #[cfg(not(unix))]
-            {
-                (false, false, false, false)
-            }
-        };
-
         Ok(Metadata {
-            ft: FileType {
-                dir: filetype.is_dir(),
-                file: filetype.is_file(),
-                symlink: filetype.is_symlink(),
-                char_device,
-                block_device,
-                socket,
-                fifo,
-            },
+            ft: std_file_type_to_virtual(self.file_type()),
             accessed: self
                 .accessed()
                 .and_then(|time| time.duration_since(UNIX_EPOCH).map_err(io::Error::other))
@@ -310,6 +284,48 @@ impl TryInto<Metadata> for std::fs::Metadata {
             len: self.len(),
         })
     }
+}
+
+fn std_file_type_to_virtual(file_type: fs::FileType) -> FileType {
+    let (char_device, block_device, socket, fifo) = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            (
+                file_type.is_char_device(),
+                file_type.is_block_device(),
+                file_type.is_socket(),
+                file_type.is_fifo(),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            (false, false, false, false)
+        }
+    };
+
+    FileType {
+        dir: file_type.is_dir(),
+        file: file_type.is_file(),
+        symlink: file_type.is_symlink(),
+        char_device,
+        block_device,
+        socket,
+        fifo,
+    }
+}
+
+#[cfg(unix)]
+fn stdio_file_type<T: std::os::fd::AsFd>(stdio: &T) -> Option<FileType> {
+    let fd = stdio.as_fd().try_clone_to_owned().ok()?;
+    let file = fs::File::from(fd);
+    let metadata = file.metadata().ok()?;
+    Some(std_file_type_to_virtual(metadata.file_type()))
+}
+
+#[cfg(not(unix))]
+fn stdio_file_type<T>(_stdio: &T) -> Option<FileType> {
+    None
 }
 
 impl crate::FileOpener for FileSystem {
@@ -462,6 +478,13 @@ impl VirtualFile for File {
         std::io::IsTerminal::is_terminal(&self.inner_std)
     }
 
+    fn file_type(&self) -> Option<FileType> {
+        self.inner_std
+            .metadata()
+            .ok()
+            .map(|metadata| std_file_type_to_virtual(metadata.file_type()))
+    }
+
     fn poll_read_ready(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         let cursor = match self.inner_std.stream_position() {
             Ok(a) => a,
@@ -612,6 +635,10 @@ impl VirtualFile for Stdout {
 
     fn is_terminal(&self) -> bool {
         std::io::IsTerminal::is_terminal(&std::io::stdout())
+    }
+
+    fn file_type(&self) -> Option<FileType> {
+        stdio_file_type(&std::io::stdout())
     }
 
     fn poll_read_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
@@ -792,6 +819,10 @@ impl VirtualFile for Stderr {
         std::io::IsTerminal::is_terminal(&std::io::stderr())
     }
 
+    fn file_type(&self) -> Option<FileType> {
+        stdio_file_type(&std::io::stderr())
+    }
+
     fn poll_read_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         Poll::Ready(Ok(0))
     }
@@ -910,6 +941,10 @@ impl VirtualFile for Stdin {
 
     fn is_terminal(&self) -> bool {
         std::io::IsTerminal::is_terminal(&std::io::stdin())
+    }
+
+    fn file_type(&self) -> Option<FileType> {
+        stdio_file_type(&std::io::stdin())
     }
 
     fn poll_read_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
