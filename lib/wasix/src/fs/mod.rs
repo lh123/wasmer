@@ -2173,7 +2173,7 @@ impl WasiFs {
             let new_fd_entry = Fd {
                 inner: FdInner {
                     offset: fd_entry.inner.offset.clone(),
-                    rights: fd_entry.inner.rights_inheriting,
+                    rights: fd_entry.inner.rights,
                     fd_flags: {
                         let mut f = fd_entry.inner.fd_flags;
                         f.set(Fdflagsext::CLOEXEC, false);
@@ -2894,6 +2894,33 @@ mod tests {
 
     use crate::WasiEnvBuilder;
     use crate::bin_factory::{BinaryPackage, BinaryPackageMount, BinaryPackageMounts};
+
+    #[test]
+    fn dup2_preserves_source_rights() {
+        let inodes = WasiInodes::new();
+        let fs_backing =
+            WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
+        let wasi_fs = WasiFs::new_init(fs_backing, &inodes, FS_ROOT_INO).unwrap();
+        let original_stdout = wasi_fs.get_fd(__WASI_STDOUT_FILENO).unwrap();
+
+        assert!(
+            original_stdout
+                .inner
+                .rights
+                .contains(Rights::FD_FILESTAT_GET)
+        );
+        assert_eq!(original_stdout.inner.rights_inheriting, Rights::empty());
+
+        wasi_fs.dup2_at(__WASI_STDOUT_FILENO, 10).unwrap();
+        wasi_fs.dup2_at(10, __WASI_STDOUT_FILENO).unwrap();
+
+        let restored_stdout = wasi_fs.get_fd(__WASI_STDOUT_FILENO).unwrap();
+        assert_eq!(restored_stdout.inner.rights, original_stdout.inner.rights);
+        assert_eq!(
+            restored_stdout.inner.rights_inheriting,
+            original_stdout.inner.rights_inheriting
+        );
+    }
 
     #[tokio::test]
     async fn fdstat_uses_swapped_stdio_terminal_state() {
