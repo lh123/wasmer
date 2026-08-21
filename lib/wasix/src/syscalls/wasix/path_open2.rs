@@ -114,6 +114,12 @@ pub fn path_open2<M: MemorySize>(
     Ok(Errno::Success)
 }
 
+fn dev_fd_number(path: &str) -> Option<WasiFd> {
+    path.strip_prefix("/dev/fd/")
+        .filter(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|rest| rest.parse().ok())
+}
+
 /// Open or create a filesystem object in the WASIX POSIX guest namespace.
 ///
 /// This function sits on top of `WasiFs::get_inode_at_path()`, so it must
@@ -167,6 +173,21 @@ pub(crate) fn path_open_internal(
     fd_flags: Fdflagsext,
     with_fd: Option<WasiFd>,
 ) -> Result<Result<WasiFd, Errno>, WasiError> {
+    if let Some(source_fd) = dev_fd_number(path) {
+        if o_flags.contains(Oflags::DIRECTORY) {
+            return Ok(Err(Errno::Notdir));
+        }
+        let state = env.state.deref();
+        let mut fd_map = state.fs.fd_map.write().unwrap();
+        return Ok(WasiFs::clone_fd_locked(
+            &state.fs,
+            &mut fd_map,
+            source_fd,
+            0,
+            None,
+        ));
+    }
+
     path_open_internal_with_symlink_depth(
         env,
         dirfd,
@@ -742,4 +763,18 @@ fn insert_fd_locked(
         with_fd,
         with_fd.is_some(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dev_fd_number;
+
+    #[test]
+    fn parses_dev_fd_paths() {
+        assert_eq!(dev_fd_number("/dev/fd/0"), Some(0));
+        assert_eq!(dev_fd_number("/dev/fd/63"), Some(63));
+        assert_eq!(dev_fd_number("/dev/fd/"), None);
+        assert_eq!(dev_fd_number("/dev/fd/1/file"), None);
+        assert_eq!(dev_fd_number("/tmp/fd/1"), None);
+    }
 }

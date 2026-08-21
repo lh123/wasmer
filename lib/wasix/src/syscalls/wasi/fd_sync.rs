@@ -17,9 +17,6 @@ pub fn fd_sync(mut ctx: FunctionEnvMut<'_, WasiEnv>, fd: WasiFd) -> Result<Errno
     let env = ctx.data();
     let (_, mut state) = unsafe { env.get_memory_and_wasi_state(&ctx, 0) };
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    if !fd_entry.inner.rights.contains(Rights::FD_SYNC) {
-        return Ok(Errno::Access);
-    }
     let inode = fd_entry.inode;
 
     // TODO: implement this for more than files
@@ -53,7 +50,7 @@ pub fn fd_sync(mut ctx: FunctionEnvMut<'_, WasiEnv>, fd: WasiFd) -> Result<Errno
                     return Ok(Errno::Inval);
                 }
             }
-            Kind::Root { .. } | Kind::Dir { .. } => return Ok(Errno::Isdir),
+            Kind::Root { .. } | Kind::Dir { .. } => return Ok(Errno::Success),
             // Linux fsync(2) returns EINVAL for fds "bound to a special file
             // (e.g., a pipe, FIFO, or socket) which does not support
             // synchronization.", mirror that behaviour

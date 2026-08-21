@@ -14,9 +14,6 @@ pub fn fd_datasync(mut ctx: FunctionEnvMut<'_, WasiEnv>, fd: WasiFd) -> Result<E
     let env = ctx.data();
     let (_, state) = unsafe { env.get_memory_and_wasi_state(&ctx, 0) };
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    if !fd_entry.inner.rights.contains(Rights::FD_DATASYNC) {
-        return Ok(Errno::Access);
-    }
 
     let file = {
         let guard = fd_entry.inode.read();
@@ -24,7 +21,7 @@ pub fn fd_datasync(mut ctx: FunctionEnvMut<'_, WasiEnv>, fd: WasiFd) -> Result<E
             Kind::File {
                 handle: Some(file), ..
             } => file.clone(),
-            Kind::Dir { .. } => return Ok(Errno::Isdir),
+            Kind::Dir { .. } => return Ok(Errno::Success),
             Kind::Buffer { .. } => return Ok(Errno::Success),
             // Linux fdatasync(2) returns EINVAL for fds bound to pipes, sockets, etc.
             _ => return Ok(Errno::Inval),

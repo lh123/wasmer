@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
-
 use super::*;
 use crate::syscalls::*;
 
@@ -225,6 +223,11 @@ pub fn path_rename_internal(
                     })?
                 };
                 if let Err(e) = res {
+                    drop(guard);
+                    let mut guard = source_parent_inode.write();
+                    if let Kind::Dir { entries, .. } = guard.deref_mut() {
+                        entries.insert(source_entry_name, source_entry);
+                    }
                     return Ok(e);
                 }
                 {
@@ -286,24 +289,19 @@ pub fn path_rename_internal(
 
     let source_size = source_entry.stat.read().unwrap().st_size;
 
-    if need_create {
-        let mut guard = target_parent_inode.write();
-        if let Kind::Dir { entries, .. } = guard.deref_mut() {
-            let result = entries.insert(target_entry_name.clone(), source_entry);
-            assert!(
-                result.is_none(),
-                "fatal error: race condition on filesystem detected or internal logic error"
-            );
-        }
+    let mut guard = target_parent_inode.write();
+    if let Kind::Dir { entries, .. } = guard.deref_mut() {
+        let replaced = entries.insert(target_entry_name.clone(), source_entry.clone());
+        assert_eq!(
+            replaced.is_none(),
+            need_create,
+            "fatal error: race condition on filesystem detected or internal logic error"
+        );
     }
+    drop(guard);
 
-    // The target entry is created, one way or the other
-    let target_inode = state
-        .fs
-        .get_inode_at_path(inodes, target_fd, target_path, true)
-        .expect("Expected target inode to exist, and it's too late to safely fail");
-    *target_inode.name.write().unwrap() = target_entry_name.into();
-    target_inode.stat.write().unwrap().st_size = source_size;
+    *source_entry.name.write().unwrap() = target_entry_name.into();
+    source_entry.stat.write().unwrap().st_size = source_size;
 
     // If the rename replaced an existing destination entry, clear any stale
     // ephemeral symlink mapping for that path.
@@ -341,11 +339,40 @@ fn rename_inode_tree(inode: &InodeGuard, source_dir_path: &Path, target_dir_path
 fn adjust_path(path: &Path, source_dir_path: &Path, target_dir_path: &Path) -> PathBuf {
     let path = crate::fs::PosixPath::from_path(path);
     let source_dir_path = crate::fs::PosixPath::from_path(source_dir_path);
-    let relative_path = path
-        .strip_prefix(&source_dir_path)
-        .with_context(|| format!("Expected path {path:?} to be a subpath of {source_dir_path:?}"))
-        .expect("Fatal filesystem error");
+    let Some(relative_path) = path.strip_prefix(&source_dir_path) else {
+        return PathBuf::from(path.as_str());
+    };
     crate::fs::PosixPath::from_path(target_dir_path)
         .join(&relative_path)
         .into_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adjust_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn adjust_path_rebases_descendant() {
+        assert_eq!(
+            adjust_path(
+                Path::new("/data/.txn/part.meta"),
+                Path::new("/data/.txn"),
+                Path::new("/data/final"),
+            ),
+            PathBuf::from("/data/final/part.meta"),
+        );
+    }
+
+    #[test]
+    fn adjust_path_preserves_hard_link_alias_outside_tree() {
+        assert_eq!(
+            adjust_path(
+                Path::new("/data/part.meta"),
+                Path::new("/data/.txn"),
+                Path::new("/data/final"),
+            ),
+            PathBuf::from("/data/part.meta"),
+        );
+    }
 }

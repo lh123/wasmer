@@ -56,6 +56,13 @@ pub(crate) fn path_unlink_file_internal(
     let (memory, mut state, inodes) = unsafe { env.get_memory_and_wasi_state_and_inodes(&ctx, 0) };
 
     let inode = wasi_try_ok!(state.fs.get_inode_at_path(inodes, fd, path, false));
+    {
+        let guard = inode.read();
+        if matches!(guard.deref(), Kind::Dir { .. } | Kind::Root { .. }) {
+            return Ok(Errno::Isdir);
+        }
+    }
+
     let (parent_inode, child_name) = wasi_try_ok!(state.fs.get_parent_inode_at_path(
         inodes,
         fd,
@@ -90,46 +97,34 @@ pub(crate) fn path_unlink_file_internal(
         }
     };
 
-    let st_nlink = {
+    {
         let mut guard = removed_inode.stat.write().unwrap();
         guard.st_nlink -= 1;
-        guard.st_nlink
-    };
-    if st_nlink == 0 {
-        {
-            let mut guard = removed_inode.read();
-            match guard.deref() {
-                Kind::File { handle, path, .. } => {
-                    if let Some(h) = handle {
-                        let mut h = h.write().unwrap();
-                        wasi_try_ok!(h.unlink().map_err(fs_error_into_wasi_err));
-                    } else {
-                        // File is closed
-                        // problem with the abstraction, we can't call unlink because there's no handle
-                        // drop mutable borrow on `path`
-                        let path = path.clone();
-                        drop(guard);
-                        wasi_try_ok!(state.fs_remove_file(path));
-                    }
-                }
-                Kind::Dir { .. } | Kind::Root { .. } => return Ok(Errno::Isdir),
-                Kind::Symlink { .. } => {
-                    match state.fs_remove_file(host_adjusted_path.as_path()) {
-                        Ok(()) => {}
-                        Err(Errno::Noent)
-                            if state
-                                .fs
-                                .ephemeral_symlink_at(host_adjusted_path.as_path())
-                                .is_some() => {}
-                        Err(err) => return Ok(err),
-                    }
-                    state
-                        .fs
-                        .unregister_ephemeral_symlink(host_adjusted_path.as_path());
-                }
-                _ => unimplemented!("wasi::path_unlink_file for Buffer"),
-            }
+    }
+
+    let guard = removed_inode.read();
+    match guard.deref() {
+        Kind::File { .. } => {
+            drop(guard);
+            wasi_try_ok!(state.fs_remove_file(host_adjusted_path.as_path()));
         }
+        Kind::Dir { .. } | Kind::Root { .. } => return Ok(Errno::Isdir),
+        Kind::Symlink { .. } => {
+            drop(guard);
+            match state.fs_remove_file(host_adjusted_path.as_path()) {
+                Ok(()) => {}
+                Err(Errno::Noent)
+                    if state
+                        .fs
+                        .ephemeral_symlink_at(host_adjusted_path.as_path())
+                        .is_some() => {}
+                Err(err) => return Ok(err),
+            }
+            state
+                .fs
+                .unregister_ephemeral_symlink(host_adjusted_path.as_path());
+        }
+        _ => unimplemented!("wasi::path_unlink_file for Buffer"),
     }
 
     Ok(Errno::Success)
