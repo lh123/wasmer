@@ -414,16 +414,11 @@ fn path_open_internal_with_symlink_depth(
             .append(false)
             .truncate(minimum_rights.truncate)
             .get_config();
-        let file_shared_config =
-            if minimum_rights.write || minimum_rights.truncate || minimum_rights.create {
-                virtual_fs::OpenOptionsConfig {
-                    read: true,
-                    write: true,
-                    ..file_requested_config.clone()
-                }
-            } else {
-                file_requested_config.clone()
-            };
+        let file_shared_config = virtual_fs::OpenOptionsConfig {
+            read: true,
+            write: true,
+            ..file_requested_config.clone()
+        };
         let requires_stronger_handle =
             minimum_rights.write || minimum_rights.truncate || minimum_rights.create;
         let mut file_open_flags = open_flags;
