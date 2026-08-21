@@ -2888,7 +2888,7 @@ mod tests {
     use super::*;
     use once_cell::sync::OnceCell;
     use tempfile::tempdir;
-    use virtual_fs::{NullFile, RootFileSystemBuilder, TmpFileSystem};
+    use virtual_fs::{ArcBoxFile, ArcFile, NullFile, RootFileSystemBuilder, TmpFileSystem};
     use wasmer::Engine;
     use wasmer_config::package::PackageId;
 
@@ -2938,6 +2938,7 @@ mod tests {
         let _master = unsafe { std::fs::File::from_raw_fd(master) };
         let slave = unsafe { std::fs::File::from_raw_fd(slave) };
         assert!(slave.is_terminal());
+        let slave_for_arc_box = slave.try_clone().unwrap();
         let inodes = WasiInodes::new();
         let fs_backing =
             WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
@@ -2951,11 +2952,31 @@ mod tests {
             false,
         );
 
+        let pty = ArcFile::new(Box::new(pty));
+        assert!(pty.is_terminal());
         wasi_fs
             .swap_file(__WASI_STDIN_FILENO, Box::new(pty))
             .unwrap();
         assert_eq!(
             wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
+            Filetype::CharacterDevice
+        );
+
+        let pty = virtual_fs::host_fs::File::new(
+            tokio::runtime::Handle::current(),
+            slave_for_arc_box,
+            PathBuf::from("/dev/pts/test"),
+            true,
+            true,
+            false,
+        );
+        let pty = ArcBoxFile::new(Box::new(pty));
+        assert!(pty.is_terminal());
+        wasi_fs
+            .swap_file(__WASI_STDOUT_FILENO, Box::new(pty))
+            .unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(__WASI_STDOUT_FILENO).unwrap().fs_filetype,
             Filetype::CharacterDevice
         );
     }
