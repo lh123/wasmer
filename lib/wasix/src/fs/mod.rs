@@ -1815,7 +1815,7 @@ impl WasiFs {
         Ok(*guard.deref())
     }
 
-    fn std_fd_filetype(is_terminal: bool) -> Filetype {
+    fn filetype_from_terminal_state(is_terminal: bool) -> Filetype {
         if is_terminal {
             Filetype::CharacterDevice
         } else {
@@ -1823,60 +1823,33 @@ impl WasiFs {
         }
     }
 
-    fn std_fd_is_terminal(&self, fd: WasiFd) -> bool {
-        WasiInodes::std_dev_get(&self.fd_map, fd)
-            .map(|file| file.is_terminal())
-            .unwrap_or(false)
-    }
-
     pub fn fdstat(&self, fd: WasiFd) -> Result<Fdstat, Errno> {
-        let is_original_stdio = matches!(
-            fd,
-            __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO
-        ) && self.get_fd(fd)?.is_stdio;
-
-        match fd {
-            __WASI_STDIN_FILENO if is_original_stdio => {
-                return Ok(Fdstat {
-                    fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
-                    fs_flags: Fdflags::empty(),
-                    fs_rights_base: STDIN_DEFAULT_RIGHTS,
-                    fs_rights_inheriting: Rights::empty(),
-                });
-            }
-            __WASI_STDOUT_FILENO if is_original_stdio => {
-                return Ok(Fdstat {
-                    fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
-                    fs_flags: Fdflags::APPEND,
-                    fs_rights_base: STDOUT_DEFAULT_RIGHTS,
-                    fs_rights_inheriting: Rights::empty(),
-                });
-            }
-            __WASI_STDERR_FILENO if is_original_stdio => {
-                return Ok(Fdstat {
-                    fs_filetype: Self::std_fd_filetype(self.std_fd_is_terminal(fd)),
-                    fs_flags: Fdflags::APPEND,
-                    fs_rights_base: STDERR_DEFAULT_RIGHTS,
-                    fs_rights_inheriting: Rights::empty(),
-                });
-            }
-            VIRTUAL_ROOT_FD => {
-                return Ok(Fdstat {
-                    fs_filetype: Filetype::Directory,
-                    fs_flags: Fdflags::empty(),
-                    // TODO: fix this
-                    fs_rights_base: ALL_RIGHTS,
-                    fs_rights_inheriting: ALL_RIGHTS,
-                });
-            }
-            _ => (),
+        if fd == VIRTUAL_ROOT_FD {
+            return Ok(Fdstat {
+                fs_filetype: Filetype::Directory,
+                fs_flags: Fdflags::empty(),
+                // TODO: fix this
+                fs_rights_base: ALL_RIGHTS,
+                fs_rights_inheriting: ALL_RIGHTS,
+            });
         }
+
         let fd = self.get_fd(fd)?;
 
         let guard = fd.inode.read();
         let deref = guard.deref();
         Ok(Fdstat {
             fs_filetype: match deref {
+                Kind::File {
+                    handle,
+                    fd: Some(_),
+                    ..
+                } => Self::filetype_from_terminal_state(
+                    handle
+                        .as_ref()
+                        .map(|handle| handle.read().unwrap().is_terminal())
+                        .unwrap_or(false),
+                ),
                 Kind::File { .. } => Filetype::RegularFile,
                 Kind::Dir { .. } => Filetype::Directory,
                 Kind::Symlink { .. } => Filetype::SymbolicLink,
@@ -2935,7 +2908,7 @@ mod tests {
     }
 
     #[test]
-    fn pipe_fds_report_stream_filetype_after_stdio_redirection() {
+    fn pipe_fds_report_stream_filetype_at_stdio_numbers() {
         let inodes = WasiInodes::new();
         let fs_backing =
             WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
@@ -2970,6 +2943,31 @@ mod tests {
         );
 
         wasi_fs.dup2_at(pipe_fd, __WASI_STDIN_FILENO).unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
+            Filetype::SocketStream
+        );
+
+        let (_, direct_rx) = Pipe::new().split();
+        let direct_pipe_inode = wasi_fs.create_inode_with_default_stat(
+            &inodes,
+            Kind::PipeRx { rx: direct_rx },
+            false,
+            "direct-stdio-pipe".into(),
+        );
+        wasi_fs
+            .create_fd_ext(
+                rights,
+                rights,
+                Fdflags::empty(),
+                Fdflagsext::empty(),
+                0,
+                direct_pipe_inode,
+                Some(__WASI_STDIN_FILENO),
+                false,
+            )
+            .unwrap();
+        assert!(wasi_fs.get_fd(__WASI_STDIN_FILENO).unwrap().is_stdio);
         assert_eq!(
             wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
             Filetype::SocketStream
