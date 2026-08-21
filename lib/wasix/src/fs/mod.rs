@@ -1811,15 +1811,32 @@ impl WasiFs {
 
     pub fn filestat_fd(&self, fd: WasiFd) -> Result<Filestat, Errno> {
         let inode = self.get_fd_inode(fd)?;
-        let guard = inode.stat.read().unwrap();
-        Ok(*guard.deref())
+        let mut stat = *inode.stat.read().unwrap().deref();
+        let guard = inode.read();
+        if let Kind::File {
+            handle,
+            fd: Some(_),
+            ..
+        } = guard.deref()
+        {
+            stat.st_filetype = handle
+                .as_ref()
+                .map(|handle| {
+                    let handle = handle.read().unwrap();
+                    Self::virtual_file_to_wasi_file_type(handle.as_ref())
+                })
+                .unwrap_or(Filetype::Unknown);
+        }
+        Ok(stat)
     }
 
-    fn filetype_from_terminal_state(is_terminal: bool) -> Filetype {
-        if is_terminal {
+    fn virtual_file_to_wasi_file_type(file: &dyn VirtualFile) -> Filetype {
+        if file.is_terminal() {
             Filetype::CharacterDevice
         } else {
-            Filetype::Unknown
+            file.file_type()
+                .map(virtual_file_type_to_wasi_file_type)
+                .unwrap_or(Filetype::Unknown)
         }
     }
 
@@ -1844,12 +1861,13 @@ impl WasiFs {
                     handle,
                     fd: Some(_),
                     ..
-                } => Self::filetype_from_terminal_state(
-                    handle
-                        .as_ref()
-                        .map(|handle| handle.read().unwrap().is_terminal())
-                        .unwrap_or(false),
-                ),
+                } => handle
+                    .as_ref()
+                    .map(|handle| {
+                        let handle = handle.read().unwrap();
+                        Self::virtual_file_to_wasi_file_type(handle.as_ref())
+                    })
+                    .unwrap_or(Filetype::Unknown),
                 Kind::File { .. } => Filetype::RegularFile,
                 Kind::Dir { .. } => Filetype::Directory,
                 Kind::Symlink { .. } => Filetype::SymbolicLink,
@@ -2799,13 +2817,18 @@ impl FileSystem for FallbackFileSystem {
 }
 
 pub fn virtual_file_type_to_wasi_file_type(file_type: virtual_fs::FileType) -> Filetype {
-    // TODO: handle other file types
     if file_type.is_dir() {
         Filetype::Directory
     } else if file_type.is_file() {
         Filetype::RegularFile
     } else if file_type.is_symlink() {
         Filetype::SymbolicLink
+    } else if file_type.is_char_device() {
+        Filetype::CharacterDevice
+    } else if file_type.is_block_device() {
+        Filetype::BlockDevice
+    } else if file_type.is_socket() || file_type.is_fifo() {
+        Filetype::SocketStream
     } else {
         Filetype::Unknown
     }
@@ -2993,6 +3016,46 @@ mod tests {
 
     #[cfg(all(unix, feature = "host-fs"))]
     #[tokio::test]
+    async fn stdio_stats_report_a_host_pipe_as_a_stream() {
+        use std::os::fd::{FromRawFd, RawFd};
+
+        let mut pipe: [RawFd; 2] = [-1, -1];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let read = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+        let _write = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
+        let inodes = WasiInodes::new();
+        let fs_backing =
+            WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
+        let wasi_fs = WasiFs::new_init(fs_backing, &inodes, FS_ROOT_INO).unwrap();
+        let pipe = virtual_fs::host_fs::File::new(
+            tokio::runtime::Handle::current(),
+            read,
+            PathBuf::from("/host-pipe"),
+            true,
+            false,
+            false,
+        );
+        let pipe = ArcFile::new(Box::new(pipe));
+
+        assert!(pipe.file_type().unwrap().is_fifo());
+        wasi_fs
+            .swap_file(__WASI_STDIN_FILENO, Box::new(pipe))
+            .unwrap();
+        assert_eq!(
+            wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
+            Filetype::SocketStream
+        );
+        assert_eq!(
+            wasi_fs
+                .filestat_fd(__WASI_STDIN_FILENO)
+                .unwrap()
+                .st_filetype,
+            Filetype::SocketStream
+        );
+    }
+
+    #[cfg(all(unix, feature = "host-fs"))]
+    #[tokio::test]
     async fn fdstat_reports_a_swapped_pty_as_a_terminal() {
         use std::{
             io::IsTerminal,
@@ -3040,6 +3103,13 @@ mod tests {
             wasi_fs.fdstat(__WASI_STDIN_FILENO).unwrap().fs_filetype,
             Filetype::CharacterDevice
         );
+        assert_eq!(
+            wasi_fs
+                .filestat_fd(__WASI_STDIN_FILENO)
+                .unwrap()
+                .st_filetype,
+            Filetype::CharacterDevice
+        );
 
         let pty = virtual_fs::host_fs::File::new(
             tokio::runtime::Handle::current(),
@@ -3056,6 +3126,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             wasi_fs.fdstat(__WASI_STDOUT_FILENO).unwrap().fs_filetype,
+            Filetype::CharacterDevice
+        );
+        assert_eq!(
+            wasi_fs
+                .filestat_fd(__WASI_STDOUT_FILENO)
+                .unwrap()
+                .st_filetype,
             Filetype::CharacterDevice
         );
     }

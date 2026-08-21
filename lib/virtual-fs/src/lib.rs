@@ -401,6 +401,11 @@ pub trait VirtualFile:
         false
     }
 
+    /// Returns the underlying file type when it is available.
+    fn file_type(&self) -> Option<FileType> {
+        None
+    }
+
     /// Writes to this file using an mmap offset and reference
     /// (this method only works for mmap optimized file systems)
     fn write_from_mmap(&mut self, _offset: u64, _len: u64) -> std::io::Result<()> {
