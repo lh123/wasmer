@@ -309,6 +309,18 @@ impl Wasi {
         for (key, value) in &self.env_vars {
             env.insert(key.clone(), value.clone());
         }
+        // Terminal programs address the screen through terminfo, keyed by TERM.
+        // With no TERM in the guest, ncurses aborts with "terminals database is
+        // inaccessible" (less, nano) and readline drops line editing. Redirected
+        // runs get no TERM, so they stay non-interactive.
+        if !env.contains_key("TERM")
+            && (std::io::IsTerminal::is_terminal(&std::io::stdout())
+                || std::io::IsTerminal::is_terminal(&std::io::stdin()))
+        {
+            if let Ok(term) = std::env::var("TERM") {
+                env.insert("TERM".to_string(), term);
+            }
+        }
         Ok(env.into_iter().collect())
     }
 
