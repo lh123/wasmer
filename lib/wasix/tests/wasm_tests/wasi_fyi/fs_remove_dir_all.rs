@@ -11,6 +11,9 @@ fn main() {
             .collect::<Vec<_>>(),
         vec!["bar", "baz"]
     );
+    for index in 0..16 {
+        fs::write(format!("/fyi/foo/entry-with-a-long-name-{index:02}"), b"data").unwrap();
+    }
     assert!(fs::remove_dir_all("/fyi/foo").is_ok());
     assert!(fs::read_dir("/fyi/foo").is_err());
 }

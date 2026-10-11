@@ -2048,6 +2048,7 @@ impl WasiFs {
                 flags: fs_flags,
                 offset: Arc::new(AtomicU64::new(0)),
                 fd_flags,
+                readdir_snapshot: Arc::new(RwLock::new(None)),
             },
             open_flags,
             inode,
@@ -2116,6 +2117,7 @@ impl WasiFs {
                     rights_inheriting: fd.inner.rights_inheriting,
                     flags: fd.inner.flags,
                     offset: fd.inner.offset.clone(),
+                    readdir_snapshot: fd.inner.readdir_snapshot.clone(),
                     fd_flags: match cloexec {
                         None => fd.inner.fd_flags,
                         Some(cloexec) => {
@@ -2154,6 +2156,7 @@ impl WasiFs {
                 flags: Fdflags::empty(),
                 offset: Arc::new(AtomicU64::new(0)),
                 fd_flags: Fdflagsext::empty(),
+                readdir_snapshot: Arc::new(RwLock::new(None)),
             },
             open_flags: 0,
             inode: root_inode,
@@ -2205,15 +2208,18 @@ impl WasiFs {
                 inner: FdInner {
                     offset: fd_entry.inner.offset.clone(),
                     rights: fd_entry.inner.rights,
+                    rights_inheriting: fd_entry.inner.rights_inheriting,
+                    flags: fd_entry.inner.flags,
                     fd_flags: {
                         let mut f = fd_entry.inner.fd_flags;
                         f.set(Fdflagsext::CLOEXEC, false);
                         f
                     },
-                    ..fd_entry.inner
+                    readdir_snapshot: fd_entry.inner.readdir_snapshot.clone(),
                 },
+                open_flags: fd_entry.open_flags,
                 inode: fd_entry.inode.clone(),
-                ..*fd_entry
+                is_stdio: fd_entry.is_stdio,
             };
 
             let flush_target = fd_map
@@ -2621,6 +2627,7 @@ impl WasiFs {
                     flags: fd_flags,
                     offset: Arc::new(AtomicU64::new(0)),
                     fd_flags: Fdflagsext::empty(),
+                    readdir_snapshot: Arc::new(RwLock::new(None)),
                 },
                 // since we're not calling open on this, we don't need open flags
                 open_flags: 0,
