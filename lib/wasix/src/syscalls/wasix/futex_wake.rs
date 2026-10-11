@@ -27,12 +27,31 @@ pub fn futex_wake<M: MemorySize>(
     let woken = {
         let mut guard = state.futexs.lock().unwrap();
         if let Some(futex) = guard.futexes.get_mut(&pointer) {
-            let first = futex.wakers.keys().copied().next();
-            if let Some(id) = first
-                && let Some(Some(w)) = futex.wakers.remove(&id)
-            {
-                w.wake();
+            // Wake the first waiter that has actually installed its `Waker`
+            // (i.e. is genuinely asleep). A slot mapped to `None` is a waiter
+            // that reserved its place but has not been polled yet to install its
+            // `Waker`; consuming that slot would drop the wake without waking a
+            // real sleeper (the old code did exactly that, because `remove` runs
+            // inside the `&&` even when the pattern fails). When no installed
+            // waker exists, record a pending wake for the imminent first poll to
+            // consume, so the wake is not lost in the registration gap.
+            let sleeper = futex
+                .wakers
+                .iter()
+                .find(|(_, w)| w.is_some())
+                .map(|(id, _)| *id);
+            if let Some(id) = sleeper {
+                if let Some(Some(w)) = futex.wakers.remove(&id) {
+                    w.wake();
+                }
+            } else if !futex.wakers.is_empty() {
+                futex.pending_wakes += 1;
             }
+            // A pending token only means anything while a registered waiter is
+            // still around to consume it, so drop the futex once the last waiter
+            // leaves. Keeping the entry alive for an unclaimed token would strand
+            // it: every later wake would find no sleeper in the empty map and
+            // increment the counter again, unbounded and never reclaimed.
             if futex.wakers.is_empty() {
                 guard.futexes.remove(&pointer);
             }
