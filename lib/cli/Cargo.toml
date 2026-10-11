@@ -35,6 +35,7 @@ default = [
   "journal",
   "wasmer-artifact-create",
   "static-artifact-create",
+  "wasm-c-api",
 ]
 
 # # Tun-tap client for connecting to Wasmer Edge VPNs
